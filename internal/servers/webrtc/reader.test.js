@@ -17,24 +17,32 @@ if (typeof window === 'undefined') {
           controls: false,
           autoplay: false,
           style: {},
-          canPlayType: jest.fn(mimeType => mimeType === 'application/vnd.apple.mpegurl'),
+          // MSE player doesn't rely on canPlayType for HLS mimetypes
+          canPlayType: jest.fn(mimeType => {
+            // Generic mock for video element's canPlayType
+            if (mimeType === 'video/mp4; codecs="avc1.mock,mp4a.mock"') return 'probably';
+            return '';
+          }),
           addEventListener: jest.fn(),
           play: jest.fn(() => Promise.resolve()),
-          // Add other necessary video element properties and methods if needed by the SUT
+          load: jest.fn(), // Mock load method
+          removeAttribute: jest.fn(), // Mock removeAttribute
         };
         return global.videoElement;
       }
-      return {};
+      return {
+        // Mock for other elements if any are created by SUT
+      };
     },
     body: {
       appendChild: jest.fn(element => {
-        if (element.tagName === 'VIDEO') { // Assuming video element would have a tagName
-             global.videoElement = element; // Or handle more generically
-        }
+        // if (element.tagName === 'VIDEO') { // More robust check might be needed
+        //   global.videoElement = element;
+        // }
       }),
     },
   };
-  global.URL = require('url').URL; // For URL parsing in reader.js
+  global.URL = require('url').URL; 
   global.RTCPeerConnection = jest.fn().mockImplementation(() => ({
     addTransceiver: jest.fn(),
     createOffer: jest.fn(() => Promise.resolve({ sdp: 'dummy-sdp', type: 'offer' })),
@@ -45,200 +53,130 @@ if (typeof window === 'undefined') {
     onconnectionstatechange: null,
     ontrack: null,
     connectionState: 'new',
-    iceServers: [],
-    sdpSemantics: '',
   }));
   global.RTCSessionDescription = jest.fn();
   global.fetch = jest.fn();
-  global.setTimeout = jest.fn((fn, delay) => {
-    // Store timeoutId to allow clearTimeout to be mocked/checked
+  global.setTimeout = jest.fn((fn) => {
     const timeoutId = `timeout_${Math.random().toString(36).substr(2, 9)}`;
-    if (global.mockTimeouts) global.mockTimeouts[timeoutId] = fn;
+    // Simulating immediate execution for some tests or manual control via test runners
+    // fn(); 
     return timeoutId;
   });
-  global.clearTimeout = jest.fn(timeoutId => {
-    if (global.mockTimeouts && global.mockTimeouts[timeoutId]) {
-      delete global.mockTimeouts[timeoutId];
-    }
-  });
-  global.console = {
-    log: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-  };
+  global.clearTimeout = jest.fn();
+  global.console = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
+
+  // Mock MediaMTXMSEPlayer
+  global.MediaMTXMSEPlayer = jest.fn(() => ({
+    start: jest.fn(),
+    destroy: jest.fn(),
+  }));
 }
 
-// Load the MediaMTXWebRTCReader script.
-// This might require adjusting the path or using a module loader depending on the actual test setup.
-// For this example, let's assume it's already loaded and available as window.MediaMTXWebRTCReader
-// If reader.js is a module, you'd use:
-// const { MediaMTXWebRTCReader } = require('./reader');
+
+// Assuming reader.js is loaded and MediaMTXWebRTCReader is on window
+// If reader.js is a module, use:
+// const { MediaMTXWebRTCReader } = require('./reader'); 
 // For now, we rely on it being on window.
 
-describe('MediaMTXWebRTCReader HLS Fallback', () => {
+describe('MediaMTXWebRTCReader MSE Fallback', () => {
   let reader;
   let mockOnError;
   let mockOnTrack;
   let videoElement;
-  let originalFetch;
-  let originalHls;
-  let originalSupportsNonAdvertisedCodec;
-
-  // Mock Hls.js
-  const mockHlsInstance = {
-    loadSource: jest.fn(),
-    attachMedia: jest.fn(),
-    on: jest.fn(),
+  
+  const mockMsePlayerInstance = {
+    start: jest.fn(),
     destroy: jest.fn(),
   };
 
   beforeEach(() => {
-    // Store original globals
-    originalFetch = global.fetch;
-    originalHls = window.Hls;
-    
-    // Mock HLS.js on window
-    window.Hls = jest.fn(() => mockHlsInstance);
-    window.Hls.isSupported = jest.fn(() => true);
-    window.Hls.Events = { MANIFEST_PARSED: 'hlsManifestParsed', ERROR: 'hlsError' }; // Mock events
-
-    // Reset mocks for HLS instance methods
-    mockHlsInstance.loadSource.mockReset();
-    mockHlsInstance.attachMedia.mockReset();
-    mockHlsInstance.on.mockReset();
-    mockHlsInstance.destroy.mockReset();
-
+    jest.clearAllMocks(); // Clear all mocks
 
     // Create and append video element to a mock body
-    videoElement = document.createElement('video');
+    videoElement = global.document.createElement('video'); // Use the mocked createElement
     videoElement.id = 'remoteVideo';
-    document.body.appendChild(videoElement); // Mocked appendChild
+    global.document.body.appendChild(videoElement); // Use the mocked appendChild
 
     mockOnError = jest.fn();
     mockOnTrack = jest.fn();
 
-    // Mock #getNonAdvertisedCodecs to simplify test setup
-    // It calls #supportsNonAdvertisedCodec internally, which uses RTCPeerConnection
-    // By mocking this, we avoid complex RTC mocks for the codec checking part
-    originalSupportsNonAdvertisedCodec = window.MediaMTXWebRTCReader._supportsNonAdvertisedCodec;
-    window.MediaMTXWebRTCReader._supportsNonAdvertisedCodec = jest.fn(() => Promise.resolve(false));
-    
-    global.mockTimeouts = {}; // For checking setTimeout calls
+    // Mock MediaMTXMSEPlayer constructor and instance
+    window.MediaMTXMSEPlayer = jest.fn(() => mockMsePlayerInstance);
+    mockMsePlayerInstance.start.mockClear();
+    mockMsePlayerInstance.destroy.mockClear();
 
+
+    // Mock MediaMTXWebRTCReader's internal static method to simplify setup
+    // This avoids needing to mock RTCPeerConnection's full codec negotiation
+    if (window.MediaMTXWebRTCReader) {
+        window.MediaMTXWebRTCReader._supportsNonAdvertisedCodec = jest.fn(() => Promise.resolve(false));
+    } else {
+        // Define a dummy if reader.js wasn't loaded for some reason (e.g. test environment issue)
+        window.MediaMTXWebRTCReader = class { constructor() { this.close = jest.fn(); } static _supportsNonAdvertisedCodec() { return Promise.resolve(false); }};
+        console.warn("window.MediaMTXWebRTCReader was not found, using dummy for tests.");
+    }
+    
+    // Reset fetch mock for each test
+    global.fetch = jest.fn();
   });
 
   afterEach(() => {
     if (reader) {
-      reader.close(); // Ensure any internal timers or connections are cleaned up
+      reader.close(); 
     }
-    // Restore original globals
-    global.fetch = originalFetch;
-    window.Hls = originalHls;
-    window.MediaMTXWebRTCReader._supportsNonAdvertisedCodec = originalSupportsNonAdvertisedCodec;
-
-    // Clean up video element
     if (global.videoElement) {
-        global.videoElement = null; // Remove from our mock DOM
+        // global.videoElement = null; // Not strictly necessary with jest.clearAllMocks if DOM is also virtual
     }
-    // Clear any stray timeouts
-    Object.values(global.mockTimeouts).forEach(fn => clearTimeout(fn)); // This is conceptual; actual clearing depends on setTimeout mock
-    global.mockTimeouts = {};
-    jest.clearAllMocks(); // Clears call counts etc. for jest.fn()
   });
 
-  test("Switches to HLS on 'codecs not supported by client' error (using hls.js)", (done) => {
+  test("Switches to MSE on 'codecs not supported by client' error", async () => {
     const whepUrl = 'http://localhost:8889/teststream/whep';
-    const expectedHlsUrl = 'http://localhost:8889/teststream/hls/teststream.m3u8';
+    const expectedManifestUrl = 'http://localhost:8889/teststream/hls/teststream.m3u8';
+    const mockCodecs = "avc1.mock,mp4a.mock";
+    const mockManifest = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS="${mockCodecs}"\nsegment1.ts`;
 
-    global.fetch = jest.fn((url, options) => {
-      // Mock for #requestICEServers (OPTIONS)
-      if (options && options.method === 'OPTIONS') {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          headers: { get: () => '<stun:stun.l.google.com:19302>; rel="ice-server"' },
-        });
-      }
-      // Mock for #sendOffer (POST to WHEP URL) - This is where we trigger the error
-      if (options && options.method === 'POST' && url === whepUrl) {
-        return Promise.resolve({
-          ok: false,
-          status: 400,
-          json: () => Promise.resolve({ error: "codecs not supported by client" }),
-          headers: { get: () => 'application/json' }, // Ensure headers are somewhat realistic
-        });
-      }
-      // Mock for #getNonAdvertisedCodecs's internal fetch (if any, though we mock _supportsNonAdvertisedCodec)
-      // Or DELETE for session cleanup (called in handleError)
-      if (options && options.method === 'DELETE') {
-          return Promise.resolve({ ok: true, status: 200 });
-      }
-      // Default fallback for any other fetch calls
-      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('') });
-    });
+    // Setup fetch mock
+    global.fetch
+      // 1. Mock for #requestICEServers (OPTIONS)
+      .mockImplementationOnce((url, options) => {
+        if (options && options.method === 'OPTIONS') {
+          return Promise.resolve({
+            ok: true, status: 200,
+            headers: { get: () => '<stun:stun.l.google.com:19302>; rel="ice-server"' },
+          });
+        }
+        // Fallback for unexpected calls during this phase
+        return Promise.reject(new Error(`Unexpected fetch call to ${url} with options ${JSON.stringify(options)} during ICE server request`));
+      })
+      // 2. Mock for #sendOffer (POST to WHEP URL) - This triggers the error
+      .mockImplementationOnce((url, options) => {
+        if (options && options.method === 'POST' && url === whepUrl) {
+          return Promise.resolve({
+            ok: false, status: 400,
+            json: () => Promise.resolve({ error: "codecs not supported by client" }),
+            // headers: { get: () => 'application/json' }, // Not strictly needed for the error path
+          });
+        }
+        return Promise.reject(new Error(`Unexpected fetch call to ${url} with options ${JSON.stringify(options)} during WHEP POST`));
+      })
+      // 3. Mock for #fetchCodecsFromManifest (GET the manifest)
+      .mockImplementationOnce((url, options) => {
+        if (url === expectedManifestUrl && (!options || options.method === 'GET' || options.method === undefined)) {
+          return Promise.resolve({
+            ok: true, status: 200,
+            text: () => Promise.resolve(mockManifest),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected fetch call to ${url} with options ${JSON.stringify(options)} during manifest fetch`));
+      })
+      // 4. Mock for DELETE session call in WebRTC cleanup
+      .mockImplementationOnce((url, options) => {
+         if (options && options.method === 'DELETE' && url.startsWith(whepUrl)) { // session URL might be slightly different
+             return Promise.resolve({ ok: true, status: 204 });
+         }
+         return Promise.reject(new Error(`Unexpected fetch call to ${url} with options ${JSON.stringify(options)} during session delete`));
+      });
 
-    const conf = {
-      url: whepUrl,
-      onError: mockOnError,
-      onTrack: mockOnTrack,
-    };
-
-    // Instantiation of MediaMTXWebRTCReader starts the process
-    reader = new window.MediaMTXWebRTCReader(conf);
-
-    // The error handling and HLS switch is asynchronous.
-    // We need to wait for the promises to resolve and callbacks to be called.
-    // A short timeout or observing mock calls can help.
-    setTimeout(() => {
-      try {
-        expect(mockOnError).toHaveBeenCalled();
-        // Check the *last* call to onError for the HLS switching message
-        const lastErrorCallArgs = mockOnError.mock.calls[mockOnError.mock.calls.length - 1];
-        expect(lastErrorCallArgs[0]).toBe("Codecs not supported by client, switching to HLS playback.");
-        
-        expect(window.Hls).toHaveBeenCalledTimes(1);
-        expect(mockHlsInstance.loadSource).toHaveBeenCalledWith(expectedHlsUrl);
-        expect(mockHlsInstance.attachMedia).toHaveBeenCalledWith(videoElement); // Check with the DOM element
-
-        // Verify WebRTC restart logic was NOT triggered
-        // Check that setTimeout was not called for restarting (this requires more specific setTimeout mocking)
-        // For now, we can check reader.state and reader.restartTimeout
-        expect(reader.state).toBe('failed'); // or 'hls_fallback' if we used that
-        expect(reader.restartTimeout).toBeNull();
-        
-        done();
-      } catch (e) {
-        done(e);
-      }
-    }, 100); // Adjust timeout if necessary for async operations to complete
-  });
-
-  test("Switches to HLS on 'codecs not supported by client' error (native HLS)", (done) => {
-    const whepUrl = 'http://localhost:8889/teststream2/whep';
-    const expectedHlsUrl = 'http://localhost:8889/teststream2/hls/teststream2.m3u8';
-
-    // Make HLS.js appear unsupported
-    window.Hls.isSupported = jest.fn(() => false);
-
-    global.fetch = jest.fn((url, options) => {
-      if (options && options.method === 'OPTIONS') {
-        return Promise.resolve({
-          ok: true, status: 200,
-          headers: { get: () => '<stun:stun.l.google.com:19302>; rel="ice-server"' },
-        });
-      }
-      if (options && options.method === 'POST' && url === whepUrl) {
-        return Promise.resolve({
-          ok: false, status: 400,
-          json: () => Promise.resolve({ error: "codecs not supported by client" }),
-          headers: { get: () => 'application/json' },
-        });
-      }
-      if (options && options.method === 'DELETE') {
-        return Promise.resolve({ ok: true, status: 200 });
-      }
-      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('') });
-    });
 
     const conf = {
       url: whepUrl,
@@ -248,57 +186,80 @@ describe('MediaMTXWebRTCReader HLS Fallback', () => {
 
     reader = new window.MediaMTXWebRTCReader(conf);
 
-    setTimeout(() => {
-      try {
-        expect(mockOnError).toHaveBeenCalled();
-        const lastErrorCallArgs = mockOnError.mock.calls[mockOnError.mock.calls.length - 1];
-        expect(lastErrorCallArgs[0]).toBe("Codecs not supported by client, switching to HLS playback.");
-        
-        expect(window.Hls).not.toHaveBeenCalled(); // HLS constructor should not be called
-        
-        const currentVideoElement = document.getElementById('remoteVideo');
-        expect(currentVideoElement.src).toBe(expectedHlsUrl);
-        expect(currentVideoElement.type).toBe('application/vnd.apple.mpegurl');
-        // Check if play was called on the video element
-        expect(currentVideoElement.play).toHaveBeenCalled();
+    // Wait for async operations to complete. Jest's fake timers or more robust async handling might be better.
+    // For now, a simple promise flush or short delay.
+    await new Promise(resolve => setTimeout(resolve, 100)); // Let async chain in reader proceed
 
+    // Assertions
+    expect(global.fetch).toHaveBeenCalledWith(expectedManifestUrl, undefined); // Check manifest fetch
+    
+    expect(window.MediaMTXMSEPlayer).toHaveBeenCalledTimes(1);
+    expect(window.MediaMTXMSEPlayer).toHaveBeenCalledWith(
+      videoElement, // Ensure the global.videoElement is what's passed if created by mock document
+      expectedManifestUrl,
+      mockCodecs,
+      expect.any(Function) // The MSE player's error callback
+    );
 
-        expect(reader.state).toBe('failed');
-        expect(reader.restartTimeout).toBeNull();
-        
-        done();
-      } catch (e) {
-        done(e);
-      }
-    }, 100);
+    expect(mockMsePlayerInstance.start).toHaveBeenCalledTimes(1);
+    
+    // Check the *last* call to onError for the MSE switching message
+    // It might be called multiple times (e.g. initial error, then MSE switch info)
+    const lastErrorCall = mockOnError.mock.calls.pop();
+    expect(lastErrorCall[0]).toBe("Codecs not supported by client, switching to MSE playback.");
+    
+    expect(reader.state).toBe('failed'); // Or a specific state like 'mse_fallback'
+    expect(reader.restartTimeout).toBeNull(); // WebRTC restart should not be scheduled
+    expect(reader.pc).toBeNull(); // PeerConnection should be cleaned up
   });
+
+  test("close() method destroys MSE player if active", async () => {
+    const whepUrl = 'http://localhost:8889/teststream_close/whep';
+    const expectedManifestUrl = 'http://localhost:8889/teststream_close/hls/teststream_close.m3u8';
+    const mockCodecs = "avc1.close,mp4a.close";
+    const mockManifest = `#EXTM3U\n#EXT-X-STREAM-INF:CODECS="${mockCodecs}"\nsegment.ts`;
+
+    global.fetch
+      .mockResolvedValueOnce({ // OPTIONS
+        ok: true, status: 200, headers: { get: () => '' }
+      })
+      .mockResolvedValueOnce({ // POST WHEP - error
+        ok: false, status: 400, json: () => Promise.resolve({ error: "codecs not supported by client" })
+      })
+      .mockResolvedValueOnce({ // GET Manifest
+        ok: true, status: 200, text: () => Promise.resolve(mockManifest)
+      })
+      .mockResolvedValueOnce({ // DELETE session
+        ok: true, status: 204
+      });
+
+    const conf = { url: whepUrl, onError: mockOnError };
+    reader = new window.MediaMTXWebRTCReader(conf);
+
+    await new Promise(resolve => setTimeout(resolve, 50)); // Allow MSE player to be created
+
+    expect(window.MediaMTXMSEPlayer).toHaveBeenCalledTimes(1); // MSE player should have been created
+    
+    reader.close(); // Call the close method
+
+    expect(mockMsePlayerInstance.destroy).toHaveBeenCalledTimes(1);
+    expect(reader.msePlayer).toBeNull(); // Should be nulled out
+  });
+
 });
 
-// Ensure MediaMTXWebRTCReader is loaded. This is a placeholder.
-// In a real Jest setup, you would import it or ensure it's globally available via setupFiles.
-// For now, we assume reader.js has been included and populated window.MediaMTXWebRTCReader.
-// Example: require('./reader.js'); if it's made to be require-able.
-// If reader.js is not a module, it would need to be loaded via a script tag in an HTML test runner,
-// or pre-loaded into the Node global scope if using Jest for DOM-less JS testing.
-
-// A simplified mock for RTCPeerConnection's static methods used in #getNonAdvertisedCodecs
-// This is to make the #getNonAdvertisedCodecs part of the reader not fail before we get to #start
-if (window.MediaMTXWebRTCReader) { // Check if reader.js was notionally "loaded"
-    // This static method is called inside #getNonAdvertisedCodecs
-    // We mock it here to prevent it from running its complex logic that involves actual PC objects
-    window.MediaMTXWebRTCReader._supportsNonAdvertisedCodec = jest.fn(() => Promise.resolve(false));
-} else {
-    console.warn("window.MediaMTXWebRTCReader not found. Ensure reader.js is loaded before tests.");
-    // Define a dummy so tests don't crash if reader.js isn't loaded.
-    window.MediaMTXWebRTCReader = class {
-        constructor() { this.close = jest.fn(); this.state = null; this.restartTimeout = null; }
+// Ensure MediaMTXWebRTCReader and MediaMTXMSEPlayer are loaded/mocked for tests.
+// This is a simplified setup. In a real Jest environment, use setupFiles or module imports.
+if (!window.MediaMTXWebRTCReader) {
+    window.MediaMTXWebRTCReader = class { 
+        constructor(conf) { this.conf = conf; this.close = jest.fn(); this.state = null; this.pc = null; this.restartTimeout = null;} 
         static _supportsNonAdvertisedCodec() { return Promise.resolve(false); }
+        // Add a mock for #fetchCodecsFromManifest if it's called directly in tests (it's private)
     };
 }
-
-// Note: This test file structure assumes a Jest-like environment (describe, test, jest.fn, etc.)
-// and that reader.js can somehow be loaded to make MediaMTXWebRTCReader available on `window`.
-// The DOM mocking is basic; JSDOM (usually included with Jest) provides a more complete environment.
-// The `setTimeout` for assertions is a common way to handle async code in tests, but modern Jest
-// offers more robust ways like `async/await` with `waitFor` utilities if the methods under test
-// return promises or can be awaited.
+if (!window.MediaMTXMSEPlayer) {
+    window.MediaMTXMSEPlayer = jest.fn(() => ({
+        start: jest.fn(),
+        destroy: jest.fn(),
+    }));
+}

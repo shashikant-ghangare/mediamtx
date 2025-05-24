@@ -49,6 +49,39 @@ class MediaMTXWebRTCReader {
     if (this.restartTimeout !== null) {
       clearTimeout(this.restartTimeout);
     }
+
+    if (this.msePlayer) {
+      this.msePlayer.destroy();
+      this.msePlayer = null;
+    }
+  }
+
+  async #fetchCodecsFromManifest(manifestUrl) {
+    try {
+      const response = await fetch(manifestUrl);
+      if (!response.ok) {
+        throw new Error(`Manifest fetch failed: ${response.status} ${response.statusText}`);
+      }
+      const manifestText = await response.text();
+      const lines = manifestText.split('\n');
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('#EXT-X-STREAM-INF:')) {
+          const codecsMatch = trimmedLine.match(/CODECS="([^"]+)"/i);
+          if (codecsMatch && codecsMatch[1]) {
+            // The HLS manifest might contain codecs that are not directly usable by MSE (e.g. "avc1.640028,mp4a.40.2")
+            // MSE often expects something like "video/mp4; codecs=\"avc1.42E01E,mp4a.40.2\""
+            // For MediaMTXMSEPlayer, we pass the raw codec string like "avc1.42E01E,mp4a.40.2"
+            // So, we directly return the extracted value.
+            return codecsMatch[1];
+          }
+        }
+      }
+      throw new Error('CODECS attribute not found in #EXT-X-STREAM-INF tag.');
+    } catch (e) {
+      console.error(`Error fetching or parsing codecs from manifest: ${e}`);
+      throw e; // Re-throw to be caught by the caller
+    }
   }
 
   static #supportsNonAdvertisedCodec(codec, fmtp) {
@@ -338,10 +371,10 @@ class MediaMTXWebRTCReader {
     const errStr = String(err);
 
     if (errStr === "codecs not supported by client") {
-      console.log("WebRTC codecs not supported by client, initiating HLS fallback.");
+      console.log("WebRTC codecs not supported by client, initiating MSE fallback.");
 
-      // 1. Construct HLS URL
-      let hlsUrl;
+      // 1. Construct Manifest URL (HLS manifest for MSE)
+      let manifestUrl;
       try {
         const parsedUrl = new URL(this.conf.url);
         const pathSegments = parsedUrl.pathname.split('/');
@@ -356,12 +389,12 @@ class MediaMTXWebRTCReader {
           scheme = 'https:';
         }
         
-        hlsUrl = `${scheme}//${parsedUrl.host}${basePath}/hls/${streamName}.m3u8`;
-        console.log(`Constructed HLS URL: ${hlsUrl}`);
+        manifestUrl = `${scheme}//${parsedUrl.host}${basePath}/hls/${streamName}.m3u8`;
+        console.log(`Constructed MSE Manifest URL: ${manifestUrl}`);
       } catch (e) {
-        console.error("Error constructing HLS URL:", e);
+        console.error("Error constructing MSE Manifest URL:", e);
         if (this.conf.onError !== undefined) {
-          this.conf.onError("Codecs not supported and failed to construct HLS URL.");
+          this.conf.onError("Codecs not supported and failed to construct MSE Manifest URL.");
         }
         this.state = 'failed';
         // Perform minimal cleanup like the original error case
@@ -372,7 +405,7 @@ class MediaMTXWebRTCReader {
         return;
       }
 
-      // 2. Find or create a video element
+      // 2. Find or create a video element (retained from previous HLS logic)
       let videoElement = document.getElementById('remoteVideo');
       if (!videoElement) {
         console.log('Video element with ID "remoteVideo" not found, creating one.');
@@ -384,50 +417,61 @@ class MediaMTXWebRTCReader {
         document.body.appendChild(videoElement);
       }
 
-      // 3. Initialize HLS playback
-      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-        console.log('hls.js is available, using it for HLS playback.');
-        const hls = new Hls();
-        hls.loadSource(hlsUrl);
-        hls.attachMedia(videoElement);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          videoElement.play().catch(e => console.error("Error playing video:", e));
-        });
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          console.error('HLS.js error:', data);
-          if (this.conf.onError !== undefined) {
-            this.conf.onError(`HLS playback error: ${data.details}`);
+      // 3. Fetch Codecs and Initialize MSE Player
+      this.#fetchCodecsFromManifest(manifestUrl)
+        .then(extractedCodecs => {
+          if (!extractedCodecs) { // Should be caught by error in #fetchCodecsFromManifest, but as a safeguard
+            if (this.conf.onError) this.conf.onError("Could not determine codecs from HLS manifest for MSE fallback.");
+            return;
           }
-        });
-      } else {
-        console.warn('hls.js not found or not supported, attempting native HLS playback (may have limited browser support).');
-        if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-          videoElement.src = hlsUrl;
-          videoElement.type = 'application/vnd.apple.mpegurl';
-          videoElement.addEventListener('loadedmetadata', () => {
-            videoElement.play().catch(e => console.error("Error playing video with native HLS:", e));
-          });
-          videoElement.addEventListener('error', (e) => {
-            console.error('Native HLS playback error:', e);
-            if (this.conf.onError !== undefined) {
-              this.conf.onError("Native HLS playback error.");
-            }
-          });
-        } else {
-          console.error('Native HLS playback not supported by this browser.');
-          if (this.conf.onError !== undefined) {
-            this.conf.onError("Native HLS playback not supported by this browser.");
-          }
-        }
-      }
-      
-      // 4. User notification
-      if (this.conf.onError !== undefined) {
-        this.conf.onError("Codecs not supported by client, switching to HLS playback.");
-      }
+          
+          console.log(`MSE Fallback: Using codecs: ${extractedCodecs}`);
 
-      // 5. Cleanup (already largely handled, specific WebRTC UI elements might need external handling)
-      this.state = 'failed'; // Or a new state like 'hls_fallback'
+          if (this.msePlayer) {
+            this.msePlayer.destroy();
+            this.msePlayer = null;
+          }
+
+          // Ensure MediaMTXMSEPlayer is available (e.g., window.MediaMTXMSEPlayer)
+          if (typeof MediaMTXMSEPlayer === 'undefined' && typeof window.MediaMTXMSEPlayer === 'undefined') {
+             console.error("MediaMTXMSEPlayer class not found. Cannot start MSE playback.");
+             if (this.conf.onError) this.conf.onError("MediaMTXMSEPlayer class not found. Cannot start MSE playback.");
+             return;
+          }
+          const MSEPlayerClass = (typeof MediaMTXMSEPlayer !== 'undefined') ? MediaMTXMSEPlayer : window.MediaMTXMSEPlayer;
+
+
+          this.msePlayer = new MSEPlayerClass(
+            videoElement,
+            manifestUrl,
+            extractedCodecs,
+            (mseError) => {
+              if (this.conf.onError) {
+                this.conf.onError('MSE Player Error: ' + mseError);
+              }
+            }
+          );
+          this.msePlayer.start();
+
+          if (this.conf.onError !== undefined) {
+            this.conf.onError("Codecs not supported by client, switching to MSE playback.");
+          }
+        })
+        .catch(error => {
+          console.error("Failed to initialize MSE fallback:", error);
+          if (this.conf.onError !== undefined) {
+            this.conf.onError(`Failed to initialize MSE fallback: ${error.toString()}`);
+          }
+          // Ensure WebRTC cleanup still happens if MSE setup fails
+          this.state = 'failed';
+          if (this.pc !== null) { this.pc.close(); this.pc = null; }
+          if (this.sessionUrl !== null) { fetch(this.sessionUrl, { method: 'DELETE' }); this.sessionUrl = null; }
+          this.queuedCandidates = [];
+          if (this.restartTimeout !== null) { clearTimeout(this.restartTimeout); this.restartTimeout = null; }
+        });
+
+      // 4. Cleanup WebRTC (this part is crucial and should execute regardless of MSE setup success immediately after deciding to fallback)
+      this.state = 'failed'; 
       if (this.pc !== null) {
         this.pc.close();
         this.pc = null;
@@ -444,7 +488,9 @@ class MediaMTXWebRTCReader {
         clearTimeout(this.restartTimeout);
         this.restartTimeout = null;
       }
-      return;
+      // Return here because the MSE player setup is async.
+      // The WebRTC connection is stopped immediately.
+      return; 
     }
 
     if (this.state === 'running') {
