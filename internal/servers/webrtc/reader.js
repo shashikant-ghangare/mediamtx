@@ -335,119 +335,60 @@ class MediaMTXWebRTCReader {
   }
 
   #handleError(err) {
-    const errStr = String(err);
-
-    if (errStr === "codecs not supported by client") {
-      console.log("WebRTC codecs not supported by client, initiating HLS fallback.");
-
-      // 1. Construct HLS URL
-      let hlsUrl;
-      try {
-        const parsedUrl = new URL(this.conf.url);
-        const pathSegments = parsedUrl.pathname.split('/');
-        // Assuming the stream name is the last segment of the WHEP URL path
-        const streamName = pathSegments.pop() || 'stream';
-        const basePath = pathSegments.join('/');
-        
-        let scheme = parsedUrl.protocol;
-        if (scheme === 'ws:') {
-          scheme = 'http:';
-        } else if (scheme === 'wss:') {
-          scheme = 'https:';
-        }
-        
-        hlsUrl = `${scheme}//${parsedUrl.host}${basePath}/hls/${streamName}.m3u8`;
-        console.log(`Constructed HLS URL: ${hlsUrl}`);
-      } catch (e) {
-        console.error("Error constructing HLS URL:", e);
-        if (this.conf.onError !== undefined) {
-          this.conf.onError("Codecs not supported and failed to construct HLS URL.");
-        }
-        this.state = 'failed';
-        // Perform minimal cleanup like the original error case
-        if (this.pc !== null) { this.pc.close(); this.pc = null; }
-        if (this.sessionUrl !== null) { fetch(this.sessionUrl, { method: 'DELETE' }); this.sessionUrl = null; }
-        this.queuedCandidates = [];
-        if (this.restartTimeout !== null) { clearTimeout(this.restartTimeout); this.restartTimeout = null; }
-        return;
-      }
-
-      // 2. Find or create a video element
-      let videoElement = document.getElementById('remoteVideo');
-      if (!videoElement) {
-        console.log('Video element with ID "remoteVideo" not found, creating one.');
-        videoElement = document.createElement('video');
-        videoElement.id = 'remoteVideo';
-        videoElement.controls = true;
-        videoElement.autoplay = true;
-        videoElement.style.width = '100%'; // Basic styling
-        document.body.appendChild(videoElement);
-      }
-
-      // 3. Initialize HLS playback
-      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-        console.log('hls.js is available, using it for HLS playback.');
-        const hls = new Hls();
-        hls.loadSource(hlsUrl);
-        hls.attachMedia(videoElement);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          videoElement.play().catch(e => console.error("Error playing video:", e));
-        });
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          console.error('HLS.js error:', data);
-          if (this.conf.onError !== undefined) {
-            this.conf.onError(`HLS playback error: ${data.details}`);
-          }
-        });
-      } else {
-        console.warn('hls.js not found or not supported, attempting native HLS playback (may have limited browser support).');
-        if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-          videoElement.src = hlsUrl;
-          videoElement.type = 'application/vnd.apple.mpegurl';
-          videoElement.addEventListener('loadedmetadata', () => {
-            videoElement.play().catch(e => console.error("Error playing video with native HLS:", e));
-          });
-          videoElement.addEventListener('error', (e) => {
-            console.error('Native HLS playback error:', e);
-            if (this.conf.onError !== undefined) {
-              this.conf.onError("Native HLS playback error.");
-            }
-          });
-        } else {
-          console.error('Native HLS playback not supported by this browser.');
-          if (this.conf.onError !== undefined) {
-            this.conf.onError("Native HLS playback not supported by this browser.");
-          }
-        }
-      }
-      
-      // 4. User notification
-      if (this.conf.onError !== undefined) {
-        this.conf.onError("Codecs not supported by client, switching to HLS playback.");
-      }
-
-      // 5. Cleanup (already largely handled, specific WebRTC UI elements might need external handling)
-      this.state = 'failed'; // Or a new state like 'hls_fallback'
-      if (this.pc !== null) {
-        this.pc.close();
-        this.pc = null;
-      }
-      if (this.sessionUrl !== null) {
-        fetch(this.sessionUrl, {
-          method: 'DELETE',
-        });
-        this.sessionUrl = null;
-      }
-      this.queuedCandidates = [];
-      // Ensure no restart timeout is set
-      if (this.restartTimeout !== null) {
-        clearTimeout(this.restartTimeout);
-        this.restartTimeout = null;
-      }
-      return;
-    }
-
     if (this.state === 'running') {
+      // const errorKeywords = ["peer connection closed", "codec", "RTP", "SDP"];
+      // const errorMsg = err.toString().toLowerCase();
+      // const shouldRedirect = errorKeywords.some(keyword => errorMsg.includes(keyword.toLowerCase()));
+      const errStr = String(err);
+
+      if (errStr === "Error: codecs not supported by client") {
+        console.log("WebRTC codecs not supported by client, initiating HLS fallback.");
+        try {
+          const currentUrl = new URL(this.conf.url);
+          // Example: http://localhost:8889/mystream/whep -> path parts: ["", "mystream", "whep"]
+          const pathParts = currentUrl.pathname.split('/');
+          const streamName = pathParts.length > 1 ? pathParts[1] : null;
+          
+          if (streamName && streamName !== "") { // Ensure streamName is not empty
+            const newPort = "8888"; // HLS port is always 8888
+            const hlsUrl = `${currentUrl.protocol}//${currentUrl.hostname}:${newPort}/${streamName}/`;
+            console.log(`Constructed HLS URL: ${hlsUrl}`);
+            // Prevent further restarts or error handling if redirecting
+            this.state = 'redirecting'; 
+            if (this.restartTimeout !== null) {
+              clearTimeout(this.restartTimeout);
+              this.restartTimeout = null;
+            }
+            // Close existing WebRTC resources
+            if (this.pc !== null) {
+              this.pc.close();
+              this.pc = null;
+            }
+            if (this.sessionUrl !== null) {
+              // Attempt to delete the session, but don't let failure here block the redirect
+              fetch(this.sessionUrl, { method: 'DELETE' })
+                .catch(e => console.warn('WHEP session deletion failed during HLS redirect:', e));
+              this.sessionUrl = null;
+            }
+            
+            console.log(`Redirecting to HLS: ${hlsUrl} due to error: ${err}`);
+            if (this.conf.onError !== undefined) {
+              this.conf.onError(`Error "${err}" triggered redirect to HLS stream: ${hlsUrl}`);
+            }
+            setTimeout(() => {
+              window.location.href = hlsUrl;
+            }, 5000);
+            return; // Stop further processing in this function
+          } else {
+            console.error("Could not extract valid streamName from URL for HLS redirect:", this.conf.url);
+          }
+        } catch (e) {
+          console.error("Error during HLS redirect logic:", e);
+          // Fall through to default error handling if redirect construction or execution fails
+        }
+      }
+
+      // Existing error handling (if not redirected)
       if (this.pc !== null) {
         this.pc.close();
         this.pc = null;
@@ -472,17 +413,17 @@ class MediaMTXWebRTCReader {
       }, this.retryPause);
 
       if (this.conf.onError !== undefined) {
-        this.conf.onError(`${errStr}, retrying in some seconds`);
+        this.conf.onError(`${err}, retrying in some seconds`);
       }
     } else if (this.state === 'getting_codecs') {
       this.state = 'failed';
 
       if (this.conf.onError !== undefined) {
-        this.conf.onError(errStr);
+        this.conf.onError(err);
       }
     }
   }
-
+  
   #getNonAdvertisedCodecs() {
     Promise.all([
       ['pcma/8000/2'],
