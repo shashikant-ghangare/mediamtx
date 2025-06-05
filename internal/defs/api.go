@@ -12,12 +12,20 @@ import (
 type APIPathManager interface {
 	APIPathsList() (*APIPathList, error)
 	APIPathsGet(string) (*APIPath, error)
+	SetHLSServer(interface{}) // placeholder for actual type
+	SetMSEServer(interface{}) // placeholder for actual type
 }
 
 // APIHLSServer contains methods used by the API and Metrics server.
 type APIHLSServer interface {
 	APIMuxersList() (*APIHLSMuxerList, error)
 	APIMuxersGet(string) (*APIHLSMuxer, error)
+}
+
+// APIMSEServer contains methods used by the API and Metrics server.
+type APIMSEServer interface {
+	APIMuxersList() (*APIMSEMuxerList, error)
+	APIMuxersGet(string) (*APIMSEMuxer, error)
 }
 
 // APIRTSPServer contains methods used by the API and Metrics server.
@@ -79,6 +87,21 @@ type APIPath struct {
 	BytesReceived uint64                  `json:"bytesReceived"`
 	BytesSent     uint64                  `json:"bytesSent"`
 	Readers       []APIPathSourceOrReader `json:"readers"`
+}
+
+// APIMSEMuxer is an MSE muxer.
+type APIMSEMuxer struct {
+	Path        string    `json:"path"`
+	Created     time.Time `json:"created"`
+	LastRequest time.Time `json:"lastRequest"` // Example field, align with HLS
+	BytesSent   uint64    `json:"bytesSent"`   // Example field, align with HLS
+}
+
+// APIMSEMuxerList is a list of MSE muxers.
+type APIMSEMuxerList struct {
+	ItemCount int            `json:"itemCount"`
+	PageCount int            `json:"pageCount"`
+	Items     []*APIMSEMuxer `json:"items"`
 }
 
 // APIPathList is a list of paths.

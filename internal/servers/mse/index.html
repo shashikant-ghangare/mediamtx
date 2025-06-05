@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MSE Player</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f0f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        #videoContainer {
+            width: 80%;
+            max-width: 900px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        video {
+            width: 100%;
+            display: block;
+            background-color: #000;
+        }
+        #ffmpegStatus {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div id="ffmpegStatus" style="display:none;">FFmpeg Status: Idle</div>
+    <div id="videoContainer">
+        <video id="mseVideoPlayer" controls autoplay>
+            Your browser does not support the video tag.
+        </video>
+    </div>
+    <!-- Load FFmpeg via CDN -->
+    <!-- Consider downloading and hosting it yourself for production -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js" integrity="sha256-J1uB4N/Ue7gY5jB32vGZgS9gYbE+saE3u2nQyS3hVvU=" crossorigin="anonymous"></script>
+    <script src="mse.js"></script>
+</body>
+</html>

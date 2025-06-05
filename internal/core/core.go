@@ -28,6 +28,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
 	"github.com/bluenviron/mediamtx/internal/rlimit"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
+	"github.com/bluenviron/mediamtx/internal/servers/mse" // Import mse package
 	"github.com/bluenviron/mediamtx/internal/servers/rtmp"
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
@@ -80,6 +81,8 @@ type Core struct {
 	rtmpServer      *rtmp.Server
 	rtmpsServer     *rtmp.Server
 	hlsServer       *hls.Server
+	mseServer       *mse.Server // This is for the /mse/:path streaming endpoint
+	mseHTTPServer   *mse.HTTPServer // New server for HTML/JS files
 	webRTCServer    *webrtc.Server
 	srtServer       *srt.Server
 	api             *api.API
@@ -529,6 +532,48 @@ func (p *Core) createResources(initial bool) error {
 		p.hlsServer = i
 	}
 
+	if p.conf.MSE != nil && // Check if MSE is configured
+		p.mseServer == nil {
+		i := &mse.Server{
+			Address:         p.conf.MSE.Address,
+			Encryption:      p.conf.MSE.Encryption,
+			ServerKey:       p.conf.MSE.ServerKey,
+			ServerCert:      p.conf.MSE.ServerCert,
+			AllowOrigin:     p.conf.MSE.AllowOrigin,
+			TrustedProxies:  p.conf.MSE.TrustedProxies,
+			ReadTimeout:     p.conf.ReadTimeout,
+			MuxerCloseAfter: p.conf.MSE.MuxerCloseAfter,
+			Metrics:         p.metrics, // Pass metrics if available
+			PathManager:     p.pathManager,
+			Parent:          p,
+		}
+		err = i.Initialize()
+		if err != nil {
+			return err
+		}
+		p.mseServer = i
+	}
+
+	// Initialize MSE HTTP Server for static files
+	if p.conf.MSE != nil && p.conf.MSE.Enable &&
+		p.mseHTTPServer == nil {
+		hs := &mse.HTTPServer{
+			Address:        p.conf.MSE.Address, // Assuming MSEConf has Address for the HTTP server
+			Encryption:     p.conf.MSE.Encryption,
+			ServerKey:      p.conf.MSE.ServerKey,
+			ServerCert:     p.conf.MSE.ServerCert,
+			AllowOrigin:    p.conf.MSE.AllowOrigin,
+			TrustedProxies: p.conf.MSE.TrustedProxies,
+			ReadTimeout:    p.conf.ReadTimeout,
+			Parent:         p,
+		}
+		err = hs.Initialize()
+		if err != nil {
+			return fmt.Errorf("MSE HTTP server: %w", err)
+		}
+		p.mseHTTPServer = hs
+	}
+
 	if p.conf.WebRTC &&
 		p.webRTCServer == nil {
 		i := &webrtc.Server{
@@ -601,6 +646,7 @@ func (p *Core) createResources(initial bool) error {
 			RTMPServer:     p.rtmpServer,
 			RTMPSServer:    p.rtmpsServer,
 			HLSServer:      p.hlsServer,
+			MSEServer:      p.mseServer, // Pass mseServer to API
 			WebRTCServer:   p.webRTCServer,
 			SRTServer:      p.srtServer,
 			Parent:         p,
@@ -726,6 +772,34 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closePathManager ||
 		closeLogger
 
+	closeMSEServer := newConf == nil ||
+		newConf.MSE == nil || // Check if MSE conf exists in newConf
+		p.conf.MSE == nil || // Check if MSE conf exists in oldConf
+		(newConf.MSE != nil && p.conf.MSE != nil && ( // Check individual fields if both exist
+			newConf.MSE.Address != p.conf.MSE.Address ||
+			newConf.MSE.Encryption != p.conf.MSE.Encryption ||
+			newConf.MSE.ServerKey != p.conf.MSE.ServerKey ||
+			newConf.MSE.ServerCert != p.conf.MSE.ServerCert ||
+			newConf.MSE.AllowOrigin != p.conf.MSE.AllowOrigin ||
+			!reflect.DeepEqual(newConf.MSE.TrustedProxies, p.conf.MSE.TrustedProxies) ||
+			newConf.ReadTimeout != p.conf.ReadTimeout || // Common field
+			newConf.MSE.MuxerCloseAfter != p.conf.MSE.MuxerCloseAfter)) ||
+		closePathManager || // Assuming PathManager changes affect MSE
+		closeMetrics || // Assuming Metrics changes affect MSE
+		closeLogger
+
+	closeMSEHTTPServer := newConf == nil || // Logic for when to close the MSE HTTP server
+		(p.conf.MSE != nil && (newConf.MSE == nil || !newConf.MSE.Enable)) || // Was enabled, now disabled or section removed
+		(p.conf.MSE != nil && newConf.MSE != nil && newConf.MSE.Enable && // Was and is enabled, check for changes
+			(newConf.MSE.Address != p.conf.MSE.Address ||
+				newConf.MSE.Encryption != p.conf.MSE.Encryption ||
+				newConf.MSE.ServerKey != p.conf.MSE.ServerKey ||
+				newConf.MSE.ServerCert != p.conf.MSE.ServerCert ||
+				newConf.MSE.AllowOrigin != p.conf.MSE.AllowOrigin ||
+				!reflect.DeepEqual(newConf.MSE.TrustedProxies, p.conf.MSE.TrustedProxies) ||
+				newConf.ReadTimeout != p.conf.ReadTimeout)) ||
+		closeLogger // Logger change also forces restart
+
 	closeRTSPSServer := newConf == nil ||
 		newConf.RTSP != p.conf.RTSP ||
 		newConf.RTSPEncryption != p.conf.RTSPEncryption ||
@@ -846,6 +920,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeRTSPSServer ||
 		closeRTMPServer ||
 		closeHLSServer ||
+		closeMSEServer ||
 		closeWebRTCServer ||
 		closeSRTServer ||
 		closeLogger
@@ -877,6 +952,17 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if closeHLSServer && p.hlsServer != nil {
 		p.hlsServer.Close()
 		p.hlsServer = nil
+	}
+
+	// Add similar block for mseServer
+	if closeMSEServer && p.mseServer != nil { // This is for the /mse/:path streaming endpoint server
+		p.mseServer.Close()
+		p.mseServer = nil
+	}
+
+	if closeMSEHTTPServer && p.mseHTTPServer != nil { // This is for the static file server
+		p.mseHTTPServer.Close()
+		p.mseHTTPServer = nil
 	}
 
 	if closeRTMPSServer && p.rtmpsServer != nil {

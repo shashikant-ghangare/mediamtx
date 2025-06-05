@@ -13,6 +13,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
+	"github.com/bluenviron/mediamtx/internal/servers/mse" // Import for mse.Server
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -50,6 +51,15 @@ type pathSetHLSServerReq struct {
 	res chan pathSetHLSServerRes
 }
 
+type pathSetMSEServerRes struct { // New type for MSE server response
+	readyPaths []defs.Path
+}
+
+type pathSetMSEServerReq struct { // New type for MSE server request
+	s   *mse.Server // Placeholder for actual mse.Server type
+	res chan pathSetMSEServerRes
+}
+
 type pathData struct {
 	path  *path
 	ready bool
@@ -76,12 +86,14 @@ type pathManager struct {
 	ctxCancel   func()
 	wg          sync.WaitGroup
 	hlsServer   *hls.Server
+	mseServer   *mse.Server // New field for MSE server
 	paths       map[string]*pathData
 	pathsByConf map[string]map[*path]struct{}
 
 	// in
 	chReloadConf   chan map[string]*conf.Path
 	chSetHLSServer chan pathSetHLSServerReq
+	chSetMSEServer chan pathSetMSEServerReq // New channel for MSE server
 	chClosePath    chan *path
 	chPathReady    chan *path
 	chPathNotReady chan *path
@@ -102,6 +114,7 @@ func (pm *pathManager) initialize() {
 	pm.pathsByConf = make(map[string]map[*path]struct{})
 	pm.chReloadConf = make(chan map[string]*conf.Path)
 	pm.chSetHLSServer = make(chan pathSetHLSServerReq)
+	pm.chSetMSEServer = make(chan pathSetMSEServerReq) // Initialize new channel
 	pm.chClosePath = make(chan *path)
 	pm.chPathReady = make(chan *path)
 	pm.chPathNotReady = make(chan *path)
@@ -156,6 +169,10 @@ outer:
 		case req := <-pm.chSetHLSServer:
 			readyPaths := pm.doSetHLSServer(req.s)
 			req.res <- pathSetHLSServerRes{readyPaths: readyPaths}
+
+		case req := <-pm.chSetMSEServer: // Handle new channel
+			readyPaths := pm.doSetMSEServer(req.s)
+			req.res <- pathSetMSEServerRes{readyPaths: readyPaths}
 
 		case pa := <-pm.chClosePath:
 			pm.doClosePath(pa)
@@ -243,6 +260,20 @@ func (pm *pathManager) doSetHLSServer(m *hls.Server) []defs.Path {
 	return ret
 }
 
+func (pm *pathManager) doSetMSEServer(s *mse.Server) []defs.Path { // New method for MSE server
+	pm.mseServer = s
+
+	var ret []defs.Path
+
+	for _, pd := range pm.paths {
+		if pd.ready {
+			ret = append(ret, pd.path)
+		}
+	}
+
+	return ret
+}
+
 func (pm *pathManager) doClosePath(pa *path) {
 	if pd, ok := pm.paths[pa.name]; !ok || pd.path != pa {
 		return
@@ -260,6 +291,9 @@ func (pm *pathManager) doPathReady(pa *path) {
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathReady(pa)
 	}
+	if pm.mseServer != nil {
+		pm.mseServer.PathReady(pa) // Notify MSE server
+	}
 }
 
 func (pm *pathManager) doPathNotReady(pa *path) {
@@ -271,6 +305,9 @@ func (pm *pathManager) doPathNotReady(pa *path) {
 
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathNotReady(pa)
+	}
+	if pm.mseServer != nil {
+		pm.mseServer.PathNotReady(pa) // Notify MSE server
 	}
 }
 
@@ -532,6 +569,23 @@ func (pm *pathManager) SetHLSServer(s *hls.Server) []defs.Path {
 
 	select {
 	case pm.chSetHLSServer <- req:
+		res := <-req.res
+		return res.readyPaths
+
+	case <-pm.ctx.Done():
+		return nil
+	}
+}
+
+// SetMSEServer is called by mse.Server.
+func (pm *pathManager) SetMSEServer(s *mse.Server) []defs.Path {
+	req := pathSetMSEServerReq{
+		s:   s,
+		res: make(chan pathSetMSEServerRes),
+	}
+
+	select {
+	case pm.chSetMSEServer <- req:
 		res := <-req.res
 		return res.readyPaths
 

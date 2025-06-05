@@ -29,6 +29,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
 	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
+	"github.com/bluenviron/gortsplib/v4/pkg/format" // Added for format checking
 )
 
 func interfaceIsEmpty(i interface{}) bool {
@@ -104,6 +105,7 @@ type API struct {
 	RTMPServer     defs.APIRTMPServer
 	RTMPSServer    defs.APIRTMPServer
 	HLSServer      defs.APIHLSServer
+	MSEServer      defs.APIMSEServer // Add MSEServer field
 	WebRTCServer   defs.APIWebRTCServer
 	SRTServer      defs.APISRTServer
 	Parent         apiParent
@@ -188,6 +190,8 @@ func (a *API) Initialize() error {
 	group.GET("/recordings/list", a.onRecordingsList)
 	group.GET("/recordings/get/*name", a.onRecordingsGet)
 	group.DELETE("/recordings/deletesegment", a.onRecordingDeleteSegment)
+
+	group.GET("/mse/:path", a.onMSEStream)
 
 	network, address := restrictnetwork.Restrict("tcp", a.Address)
 
@@ -1134,4 +1138,72 @@ func (a *API) ReloadConf(conf *conf.Conf) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	a.Conf = conf
+}
+
+func (a *API) onMSEStream(ctx *gin.Context) {
+	pathName, ok := paramName(ctx)
+	if !ok {
+		a.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid path name"))
+		return
+	}
+
+	res := a.PathManager.Describe(defs.PathDescribeReq{
+		AccessRequest: defs.PathAccessRequest{
+			Name:    pathName,
+			Query:   ctx.Request.URL.RawQuery,
+			Publish: false, // This is a read request
+			Req:     ctx.Request,
+		},
+	})
+
+	if res.Err != nil {
+		if errors.Is(res.Err, conf.ErrPathNotFound) {
+			a.writeError(ctx, http.StatusNotFound, res.Err)
+		} else if errors.As(res.Err, &auth.Error{}) {
+			a.writeError(ctx, http.StatusUnauthorized, res.Err)
+		} else {
+			a.writeError(ctx, http.StatusInternalServerError, res.Err)
+		}
+		return
+	}
+
+	path := res.Path
+	if path == nil {
+		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("path '%s' not found or not ready", pathName))
+		return
+	}
+
+	if !path.IsReady() {
+		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("path '%s' not ready", pathName))
+		return
+	}
+
+	var h265Format *format.H265
+	media := path.Describe().Desc.FindFormat(&h265Format)
+
+	if media == nil || h265Format == nil {
+		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("H265 track not found for path '%s'", pathName))
+		return
+	}
+
+	// TODO: Actual fMP4 packaging and streaming will be handled by a dedicated MSE muxer/server component.
+	// This handler currently sets the content type and indicates H265 availability.
+	// The MSEServer (if used for more complex session management) would be involved here.
+	// For now, we are directly interacting with the path and stream details.
+
+	ctx.Header("Content-Type", `video/mp4; codecs="hvc1"`)
+	// Simulate streaming H265 initialization segment or data.
+	// In a real scenario, this would involve reading from the stream and packaging into fMP4.
+	// For now, just a success message.
+	a.Log(logger.Info, "Streaming H265 for path: "+pathName)
+	_, err := ctx.Writer.WriteString("H265 content available for path: " + pathName + "\n")
+	if err != nil {
+		a.Log(logger.Error, "Error writing MSE H265 response: %v", err)
+	}
+	// Keep the connection open if it were actual streaming
+	// ctx.Stream(func(w io.Writer) bool {
+	// 	// Write segments here
+	// 	return false // or true to continue streaming
+	// })
+	ctx.Status(http.StatusOK)
 }

@@ -294,6 +294,9 @@ type Conf struct {
 	SRT        bool   `json:"srt"`
 	SRTAddress string `json:"srtAddress"`
 
+	// MSE server (experimental)
+	MSE *MSEConf `json:"mse,omitempty"`
+
 	// Record (deprecated)
 	Record                *bool         `json:"record,omitempty"`                // deprecated
 	RecordPath            *string       `json:"recordPath,omitempty"`            // deprecated
@@ -419,6 +422,10 @@ func (conf *Conf) setDefaults() {
 	conf.SRT = true
 	conf.SRTAddress = ":8890"
 
+	// MSE server (experimental)
+	conf.MSE = &MSEConf{} // Initialize MSEConf
+	conf.MSE.setDefaults() // Set defaults for MSEConf
+
 	conf.PathDefaults.setDefaults()
 }
 
@@ -486,6 +493,28 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 	}
 
 	return fpath, nil
+}
+
+// MSEConf contains MSE server specific configuration.
+type MSEConf struct {
+	Enable          bool       `json:"enable"`
+	Address         string     `json:"address"`
+	Encryption      bool       `json:"encryption"`
+	ServerKey       string     `json:"serverKey"`
+	ServerCert      string     `json:"serverCert"`
+	AllowOrigin     string     `json:"allowOrigin"`
+	TrustedProxies  IPNetworks `json:"trustedProxies"`
+	MuxerCloseAfter Duration   `json:"muxerCloseAfter"`
+}
+
+// setDefaults sets the default values for MSEConf.
+func (m *MSEConf) setDefaults() {
+	m.Enable = false // Disabled by default
+	m.Address = ":8891" // Example port, different from HLS
+	m.ServerKey = "server.key"
+	m.ServerCert = "server.crt"
+	m.AllowOrigin = "*"
+	m.MuxerCloseAfter = 60 * Duration(time.Second)
 }
 
 // Clone clones the configuration.
